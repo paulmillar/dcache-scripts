@@ -1,0 +1,123 @@
+#!/bin/sh
+
+#  This script starts zookeeper and kafka in a reliable fashion and
+#  prompts when the service is available.  It waits for input then
+#  shuts down both services reliably.
+#
+#  Note: this script is intended for developers and is NOT intended
+#  for production use.
+#
+#  To install, copy this script into the 'bin' directory of a Kafka
+#  release.
+
+zookeeper_config=config/zookeeper.properties
+kafka_config=config/server.properties
+
+cd $(dirname $0)/..
+
+zookeeper_state=$(sed -n 's/dataDir=//p' $zookeeper_config)
+kafka_state=$(sed -n 's/log.dirs=//p' $kafka_config)
+
+trap stop_all EXIT
+
+clear_state() {
+    echo -n "Clearing old state:"
+    [ -e $kafka_state ] && (rm -r $kafka_state; echo -n " kafka")
+    [ -e $zookeeper_state ] && (rm -r $zookeeper_state; echo -n " zookeeper")
+    echo
+}
+
+tcp_listening_port() { # $1 - TCP port
+    netstat -nl | grep -q ":$1 " && return 1
+    return 0
+}
+
+wait_for() { # $1 - TCP port
+    while tcp_listening_port $1; do
+	  echo -n "."
+	  sleep 1
+    done
+    echo
+}
+
+start_zookeeper() {
+    [ -f zk.out ] && mv zk.out zk.out.old
+    echo -n "Starting zookeeper server"
+    bin/zookeeper-server-start.sh $zookeeper_config >zk.out &
+    zookeeper_pid=$!
+
+    wait_for $(sed -n 's/clientPort=//p' $zookeeper_config)
+}
+
+start_kafka() {
+    [ -f kafka.out ] && mv kafka.out kafka.out.old
+    echo -n "Starting kafka server"
+    bin/kafka-server-start.sh config/server.properties >kafka.out &
+    kafka_pid=$!
+    
+    wait_for 9092
+}
+
+stop() {
+    local pid=$1
+    local name=$2
+
+    if [ "$pid" = "" ]; then
+	return
+    fi
+
+    if ! kill -0 $pid 2>/dev/null; then
+	echo "$name is already dead!"
+	return
+    fi
+
+    echo -n "Shutting down $name server"
+    kill $pid
+
+    if ! kill -0 $pid 2>/dev/null; then
+	echo
+	return
+    fi
+
+    for n in $(seq 1 10); do
+	sleep 1
+	if ! kill -0 $pid 2>/dev/null; then
+	    echo
+	    return
+	fi
+	echo -n "."
+    done
+    echo -e "\nNice shutdown didn't work, using force."
+    kill -9 $pid
+}
+
+stop_all() {
+    stop "$kafka_pid" kafka
+    stop "$zookeeper_pid" zookeeper
+}
+
+
+if [ "$1" = "--tabula-rasa" ]; then
+    clear_state
+elif [ -n "$1" ]; then
+    echo Unknown option "$1"
+    echo
+    echo "$0 [--tabula-rasa]"
+    echo
+    echo "    --tabula-rasa  clear zookeeper and kafka state before starting."
+    echo
+    exit 1
+else
+    [ -e $zookeeper_state ] || echo "Warning: no existing zookeeper state"
+    [ -e $kafka_state ] || echo "Warning: no existing kafka state"
+fi
+
+start_zookeeper
+start_kafka
+
+echo
+echo "Services started!"
+echo
+echo -n "Press ENTER to quit"
+read ignored
+echo
